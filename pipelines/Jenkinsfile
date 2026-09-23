@@ -1,0 +1,22 @@
+pipeline {
+    agent any
+    stages {
+        stage('Compilación') {
+            steps {
+                echo 'Compilando el proyecto'
+            }
+        }
+        stage('Pruebas') {
+            steps {
+                echo 'Ejecutando pruebas'
+                sh 'pytest'
+            }
+        }
+        stage('Despliegue') {
+            steps {
+                echo 'Desplegando el proyecto'
+                sh 'python src/main.py'
+            }
+        }
+    }
+}
