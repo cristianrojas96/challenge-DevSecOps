@@ -57,3 +57,63 @@ Se analiza el proceso de despliegue de productos de datos que incluyen desde inf
 
 
 
+
+---
+
+## Fase 2: Diseño de un pipeline de despliegue optimizado
+
+### 1. Punto de partida
+
+El `pipelines/Jenkinsfile` original tiene tres etapas:
+
+| Etapa | Qué hace |
+|---|---|
+| Compilación | Solo imprime un texto (`echo`) |
+| Pruebas | Ejecuta `pytest` |
+| Despliegue | Ejecuta `python src/main.py` en la máquina de Jenkins |
+
+
+### 2. Decisiones de diseño
+
+| Decisión | Elección | Justificación |
+|---|---|---|
+| Herramienta de CI/CD | **Jenkins** | Es la herramienta del repositorio del reto y permite aprender una herramienta nueva, ya que no la he usado antes |
+| Qué se despliega | **El proyecto del reto tal cual** (script de Python) | No se requiere generar un producto de datos como se hace actualmente; la idea es demostrar que se puede tener un despliegue |
+| Entorno de ejecución | **Contenedor Docker `python:3.12`** | Garantiza la misma versión de Python en cualquier máquina o agente, evitando el "en mi máquina funciona" |
+| Artefacto | **Archivo `.zip`** con `src/` y `requirements.txt` | Normalmente prefiero empaquetar todo en una imagen Docker, porque es fácil de replicar, pero para esta actividad un zip es rápido y sencillo |
+| Destino del despliegue | **Una carpeta local** que simula el entorno de destino | Mantiene el pipeline ejecutable en local sin depender de una nube |
+| Orden de las validaciones | **Secretos → SCA → Lint → Pruebas** | Primero lo más grave: una filtración de información sensible puede comprometer datos de clientes y de la empresa, y además es una validación rápida. Luego las vulnerabilidades en dependencias (seguridad) y después la calidad del código (lint y pruebas) |
+
+### 3. Etapas del pipeline
+
+| # | Etapa | Herramienta | Qué hace | Por qué existe |
+|---|---|---|---|---|
+| 0 | Checkout | `checkout scm` | Descarga el código del repositorio | Punto de partida del pipeline |
+| 1 | Preparar entorno | `python:3.12` + venv | Crea el entorno virtual e instala `requirements-dev.txt` | Automatiza lo que en la Fase 0 se hizo a mano; en un clon limpio no hay dependencias |
+| 2 | Detección de secretos | Gitleaks | Busca contraseñas, tokens, IPs u otra información sensible en el código | Evitar exponer información sensible. Es la misma herramienta usada en la organización |
+| 3 | SCA | pip-audit | Revisa si las dependencias tienen vulnerabilidades conocidas (CVE) | El código también está compuesto por librerías de terceros, que pueden tener fallos de seguridad |
+| 4 | Lint | Ruff | Valida sintaxis y buenas prácticas del código | Reemplaza la etapa "Compilación" del original, que no validaba nada |
+| 5 | Pruebas | pytest + reporte JUnit | Ejecuta las pruebas y publica el resultado en Jenkins | Detectar si un cambio rompió algo |
+| 6 | Empaquetar | zip + `archiveArtifacts` | Genera el artefacto y lo guarda en Jenkins | *Build once, deploy many*: lo que se probó es exactamente lo que se despliega |
+| 7 | Aprobación | `input` | Pausa el pipeline hasta que una persona lo apruebe | Control humano antes de desplegar, como la aprobación usada en la organización |
+| 8 | Despliegue | Copia + `python -m src.main` | Copia el artefacto a la carpeta de destino, lo descomprime y lo ejecuta | Llevar el artefacto a un entorno distinto al de construcción. Se usa `-m` para ejecutar igual que en las pruebas |
+| — | `post` (bloque final) | `always` / `failure` | Se ejecuta al terminar el pipeline, haya salido bien o mal (como el `finally` en Python). Publica el reporte de pruebas, borra archivos temporales y avisa si algo falló | Saber qué pasó en cada ejecución y evitar que archivos de una ejecución anterior afecten a la siguiente |
+
+### 4. Diagrama
+
+```mermaid
+flowchart LR
+    A[Checkout] --> B[Preparar entorno<br/>python:3.12 + venv]
+    B --> C[Detección de secretos<br/>Gitleaks]
+    C --> E[SCA<br/>pip-audit]
+    E --> D[Lint<br/>Ruff]
+    D --> F[Pruebas<br/>pytest]
+    F --> G[Empaquetar<br/>zip]
+    G --> H{Aprobación<br/>input}
+    H -- Aprobado --> I[Despliegue<br/>carpeta destino]
+    H -- Rechazado --> X[Pipeline detenido]
+    C -. falla .-> X
+    D -. falla .-> X
+    E -. falla .-> X
+    F -. falla .-> X
+```
