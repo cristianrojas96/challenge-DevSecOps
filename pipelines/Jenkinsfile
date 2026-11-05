@@ -13,11 +13,19 @@ pipeline {
                 sh '.venv/bin/pip install -r requirements-dev.txt'
             }
         }
-        stage('Compilación') {
+        stage('Detección de secretos') {
+            agent {
+                docker {
+                    image 'ghcr.io/gitleaks/gitleaks:v8.30.1'
+                    args '--entrypoint='
+                    reuseNode true
+                }
+            }
             steps {
-                echo 'Compilando el proyecto'
+                sh 'gitleaks git --redact --no-banner -v --report-path reports/gitleaks.json .'
             }
         }
+
         stage('Pruebas') {
             agent {
                 docker {
@@ -28,12 +36,6 @@ pipeline {
             steps {
                 echo 'Ejecutando pruebas'
                 sh '.venv/bin/python -m pytest --junitxml=reports/junit.xml'
-            }
-        }
-        stage('Despliegue') {
-            steps {
-                echo 'Desplegando el proyecto'
-                sh 'python src/main.py'
             }
         }
     }
