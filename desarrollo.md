@@ -117,3 +117,101 @@ flowchart LR
     E -. falla .-> X
     F -. falla .-> X
 ```
+---
+
+## Fase 3: Implementación y validación del pipeline de despliegue
+
+### 1. Entorno de ejecución: Jenkins en Docker
+
+Para ejecutar el `Jenkinsfile` se necesita un servidor de Jenkins. Se levanta en local con Docker (sobre Colima), usando los archivos de `infra/jenkins/`:
+
+| Archivo | Qué hace |
+|---|---|
+| `Dockerfile` | Parte de la imagen oficial `jenkins/jenkins:lts-jdk21` y le agrega el cliente de Docker (`docker-ce-cli`) y los plugins `workflow-aggregator`, `git`, `docker-workflow` y `junit` |
+| `docker-compose.yml` | Levanta Jenkins en el puerto **8081** (el 8080 ya estaba ocupado), con un volumen persistente para su configuración y acceso al socket de Docker |
+
+Para levantarlo, desde `infra/jenkins/`:
+
+```bash
+docker compose up -d --build
+```
+
+#### Arquitectura
+
+A través del contenedor de Jenkins se interactúa con Docker para crear contenedores. Jenkins no tiene un motor de Docker propio: usa el de Colima a través del socket (`/var/run/docker.sock`). Este patrón se conoce como *Docker-outside-of-Docker*.
+
+```mermaid
+flowchart TB
+    subgraph VM[Máquina virtual de Colima]
+        M[Motor de Docker]
+        J[Contenedor Jenkins] -- órdenes por el socket --> M
+        M -- crea --> P[Contenedor python:3.12-slim<br/>donde corren las etapas]
+    end
+```
+
+#### Decisiones de seguridad
+
+| Decisión | Justificación |
+|---|---|
+| Imagen base oficial de Jenkins | Reduce el riesgo de usar una imagen alterada (cadena de suministro) |
+| Instalar Docker con su llave GPG oficial | Verifica que el paquete realmente viene de Docker |
+| Volver al usuario `jenkins` después de instalar | No dejar la imagen corriendo como `root` |
+| Dar acceso al socket de Docker agregando el usuario `jenkins` al grupo dueño del socket (`group_add`, grupo 991), en lugar de ejecutar Jenkins como `root` | Principio de mínimo privilegio: Jenkins recibe solo el permiso que necesita (usar Docker) y no control total del contenedor |
+
+
+### 2. Configuración del job en Jenkins
+
+| Campo | Valor |
+|---|---|
+| Tipo | Pipeline |
+| Definition | **Pipeline script from SCM** (SCM = *Source Code Management*, en este caso Git). Jenkins lee el pipeline desde el repositorio (`pipelines/Jenkinsfile`) en lugar de escribirlo en la interfaz de Jenkins. Así el pipeline tiene historial de cambios y vive junto al código (*Pipeline as Code*) |
+| Repositorio | `https://github.com/cristianrojas96/challenge-DevSecOps.git` (público, sin credenciales) |
+| Rama | `*/main` |
+| Script Path | `pipelines/Jenkinsfile` |
+
+### 3. Antes: ejecución del Jenkinsfile original (build #1)
+
+Resultado: ❌ **FAILURE**
+
+| Etapa | Resultado | Observación |
+|---|---|---|
+| Compilación | 🟢 Pasó | Solo ejecuta un `echo`: sale en verde sin validar nada |
+| Pruebas | 🔴 Falló | `pytest: not found` (código de salida 127: comando no encontrado) |
+| Despliegue | ⚪ Omitida | Se saltó por el fallo anterior |
+
+```
++ pytest
+.../script.sh.copy: 1: pytest: not found
+ERROR: script returned exit code 127
+Finished: FAILURE
+```
+
+### 4. Pipeline implementado
+
+Resultado: ✅ **SUCCESS**
+
+```mermaid
+flowchart LR
+    A[Checkout] --> B[Preparar entorno<br/>python:3.12-slim + venv]
+    B --> C[Detección de secretos<br/>Gitleaks]
+    C --> D[SCA<br/>pip-audit]
+    D --> E[Pruebas<br/>pytest]
+    E --> F{Aprobación<br/>input}
+    F -- Aprobado --> G[Despliegue<br/>carpeta destino]
+    F -- Rechazado --> X[Pipeline detenido]
+    C -. falla .-> X
+    D -. falla .-> X
+    E -. falla .-> X
+```
+
+| Etapa | Contenedor | Qué hace |
+|---|---|---|
+| Preparar entorno | `python:3.12-slim` | Crea el `.venv` e instala `requirements-dev.txt` |
+| Detección de secretos | `ghcr.io/gitleaks/gitleaks:v8.30.1` | Revisa todo el historial de commits buscando secretos. Con `--redact`, si encuentra uno no lo muestra en el log |
+| SCA | `python:3.12-slim` | pip-audit revisa si las dependencias tienen vulnerabilidades conocidas |
+| Pruebas | `python:3.12-slim` | Ejecuta `python -m pytest` y genera el reporte JUnit |
+| Despliegue | `python:3.12-slim` | Pide aprobación manual (con un tiempo límite de 30 minutos). Si se aprueba, copia solo `src/` y `requirements.txt` a la carpeta de destino y ejecuta `python -m src.main` |
+
+Cada etapa corre en su propio contenedor, que se destruye al terminar; la carpeta de trabajo (con el `.venv`) se comparte entre etapas. Si cualquier etapa falla, el pipeline se detiene y no se despliega.
+
+Durante la implementación, la etapa SCA detectó una vulnerabilidad real (**PYSEC-2026-1845**) en `pytest 7.1.2`, que venía en el proyecto original. Se corrigió actualizando a `pytest 9.0.3`.
