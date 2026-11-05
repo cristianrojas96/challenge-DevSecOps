@@ -1,6 +1,18 @@
 pipeline {
     agent any
     stages {
+        stage('Preparar entorno') {
+            agent {
+                docker {
+                    image 'python:3.12-slim'
+                    reuseNode true
+                }
+            }
+            steps {
+                sh 'python -m venv .venv'
+                sh '.venv/bin/pip install -r requirements-dev.txt'
+            }
+        }
         stage('Compilación') {
             steps {
                 echo 'Compilando el proyecto'
