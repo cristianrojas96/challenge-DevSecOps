@@ -22,10 +22,21 @@ pipeline {
                 }
             }
             steps {
-                sh 'gitleaks git --redact --no-banner -v --report-path reports/gitleaks.json .'
+                sh 'gitleaks git --redact --no-banner --no-color -v --report-path reports/gitleaks.json .'
             }
         }
-
+        stage('SCA') {
+            agent {
+                docker {
+                    image 'python:3.12-slim'
+                    reuseNode true
+                }
+            }
+            steps {
+                sh '.venv/bin/pip install pip-audit'
+                sh '.venv/bin/pip-audit -r requirements-dev.txt'
+            }
+        }
         stage('Pruebas') {
             agent {
                 docker {
